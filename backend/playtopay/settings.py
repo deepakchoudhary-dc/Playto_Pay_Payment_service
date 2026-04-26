@@ -49,23 +49,18 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "playtopay.wsgi.application"
 
-import urllib.parse
+import dj_database_url
 database_url = os.environ.get("DATABASE_URL")
 
 if database_url:
     DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": urllib.parse.urlparse(database_url).path[1:],
-            "USER": urllib.parse.urlparse(database_url).username,
-            "PASSWORD": urllib.parse.urlparse(database_url).password,
-            "HOST": urllib.parse.urlparse(database_url).hostname,
-            "PORT": urllib.parse.urlparse(database_url).port or "5432",
-            "CONN_MAX_AGE": 60,
-        }
+        "default": dj_database_url.config(
+            default=database_url,
+            conn_max_age=60,
+            conn_health_checks=True,
+        )
     }
 else:
-    import builtins
     DATABASES = {
         "default": {
             "ENGINE": os.environ.get("DB_ENGINE", "django.db.backends.postgresql"),
