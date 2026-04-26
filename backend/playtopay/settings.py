@@ -5,7 +5,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-playto-pay-secret")
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
+
 ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,backend").split(",")
+# Automatically trust the Render external assigned hostname
+if "RENDER_EXTERNAL_HOSTNAME" in os.environ:
+    ALLOWED_HOSTS.append(os.environ["RENDER_EXTERNAL_HOSTNAME"])
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -49,18 +53,11 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "playtopay.wsgi.application"
 
-import sys
 import dj_database_url
 database_url = os.environ.get("DATABASE_URL", "").strip()
 
 if os.environ.get("RENDER") and not database_url:
-    print("\n" + "!" * 80)
-    print("CRITICAL ERROR: Django cannot find 'DATABASE_URL' in the environment variables.")
-    print("This means Render is NOT injecting the variable into your Web Service.")
-    print("Check the Render Dashboard -> Environment -> Environment Variables.")
-    print("Ensure the Key is exactly DATABASE_URL (no spaces!) and click 'Save Changes'.")
-    print("!" * 80 + "\n")
-    sys.exit(1)
+    raise ValueError("CRITICAL ERROR on Render: The 'DATABASE_URL' environment variable is STILL missing or empty! Make sure you hit 'Save Changes'.")
 
 if database_url:
     DATABASES = {
