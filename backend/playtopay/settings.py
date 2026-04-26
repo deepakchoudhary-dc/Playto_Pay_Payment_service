@@ -49,8 +49,18 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "playtopay.wsgi.application"
 
+import sys
 import dj_database_url
-database_url = os.environ.get("DATABASE_URL")
+database_url = os.environ.get("DATABASE_URL", "").strip()
+
+if os.environ.get("RENDER") and not database_url:
+    print("\n" + "!" * 80)
+    print("CRITICAL ERROR: Django cannot find 'DATABASE_URL' in the environment variables.")
+    print("This means Render is NOT injecting the variable into your Web Service.")
+    print("Check the Render Dashboard -> Environment -> Environment Variables.")
+    print("Ensure the Key is exactly DATABASE_URL (no spaces!) and click 'Save Changes'.")
+    print("!" * 80 + "\n")
+    sys.exit(1)
 
 if database_url:
     DATABASES = {
