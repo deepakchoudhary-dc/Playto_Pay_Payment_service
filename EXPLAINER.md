@@ -18,6 +18,8 @@ def ledger_balances_for_merchant(merchant_id: UUID | str) -> dict[str, int]:
     )
 ```
 
+**Crucial Math Choice:** All money is strictly stored as `BigIntegerField` in `paise` (integers). We completely eliminate `FloatField` or `DecimalField` usage, totally immunizing the system against the curse of floating-point rounding errors during aggregations. 
+
 Credits and debits are bucketed into `available` and `held`. A payout request debits available and credits held, so total merchant liability does not change when funds are only reserved. A completed payout debits held. A failed payout debits held and credits available in the same transaction.
 
 `Merchant.available_balance_paise` and `Merchant.held_balance_paise` are materialized copies updated in the same database transactions as the ledger entries. The aggregate query above is used for audits, dashboard reconciliation, and anomaly repair.
@@ -69,7 +71,7 @@ except IntegrityError as exc:
 
 The recovery path only handles SQLSTATE `23505` (`unique_violation`) when the database reports the exact `unique_idempotency_key_per_merchant` constraint. Other integrity failures, such as check constraints, foreign-key errors, or unrelated unique constraints, are not misclassified as idempotency races. Invalid payout amounts are also rejected before `Payout.objects.create()` so direct service calls return a normal 400 response instead of relying on a database check constraint. There is no API-level "idempotency in progress" branch because the transaction and unique index make that state unobservable for committed rows.
 
-Keys are scoped per merchant and reset after 24 hours.
+Keys are scoped per merchant and reset after 24 hours. The frontend generates this key strictly via `crypto.randomUUID()` and sends it in the `Idempotency-Key` header. Because this is a custom header (along with `X-Merchant-Id`), Django's `CORS_ALLOW_HEADERS` must explicitly whitelist them, otherwise browsers will block the preflight request before resolving idempotency entirely!
 
 ## 4. The State Machine
 
@@ -93,6 +95,8 @@ def transition_to(self, next_status: str) -> None:
 `complete_payout()` calls `payout.transition_to(Payout.Status.COMPLETED)` before changing balances. A failed payout has no allowed next states, so failed-to-completed raises before any ledger mutation.
 
 Celery does not autoretry `process_payout` for every exception. The payout service owns business retries through `attempt_count` and `next_retry_at`; the beat task re-enqueues pending and due processing payouts. That keeps infrastructural task failures from consuming business attempts or hiding invariant failures.
+
+**Hardware Failure Resilience:** Notice this system's robust behavior on extremely constrained compute (e.g. Render's 512MB RAM free tier, running both Gunicorn and Celery concurrently): The OOM (Out Of Memory) killer assassinated the Celery worker mid-flight. Due to the state machine architecture and PostgreSQL integrity locks, the funds safely remained escrowed in the `PENDING` state on the database instead of disappearing mid-transaction!
 
 ## 5. The AI Audit
 
@@ -121,3 +125,32 @@ except IntegrityError as exc:
 The first replacement was still too broad because `IntegrityError` also covers check constraints. The production-safe version checks structured database error metadata: SQLSTATE `23505` plus the exact idempotency constraint name before replaying a response.
 
 The hot payout path also changed after review: it now trusts the locked materialized merchant balance only when its reconciliation watermark is current. If payout creation sees stale-low or stale-high materialized balance, it reconciles from the ledger once under the lock before creating or rejecting. If a terminal payout transition finds materialized held balance drift, it locks the merchant, reconciles from the ledger once, then applies the completion or failure release. Known-current insufficient balances do not run a full aggregate repeatedly, which avoids the read-repair thundering-herd failure mode while still preventing overdraws from stale-high materialized data.
+
+### Audit 2: The Brittle Environment Config (`settings.py`)
+
+The AI's first implementation for parsing `DATABASE_URL` during Render deployment was extremely brittle, using raw `urllib.parse`:
+
+```python
+import urllib.parse
+database_url = os.environ.get("DATABASE_URL")
+
+if database_url:
+    DATABASES = {"default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": urllib.parse.urlparse(database_url).path[1:],
+        # ... 
+```
+**What I caught:** During the Render build phase (e.g. running `python manage.py migrate`), `DATABASE_URL` was silently injecting empty strings. `urllib` parsing failed silently or parsed garbage, forcing Django to default to `127.0.0.1` and mysteriously throwing `psycopg.OperationalError: Connection refused` in production. 
+
+**What I replaced it with:** Replaced the bespoke parsing entirely with the industry-standard `dj-database-url` and implemented an aggressive loud threshold to break the build phase gracefully and expose the missing environment variable:
+
+```python
+import dj_database_url
+database_url = os.environ.get("DATABASE_URL", "").strip()
+
+if os.environ.get("RENDER") and not database_url:
+    raise ValueError("CRITICAL ERROR on Render: 'DATABASE_URL' is missing! Make sure to hit 'Save Changes'.")
+
+if database_url:
+    DATABASES = {"default": dj_database_url.config(default=database_url, conn_max_age=60)}
+```
