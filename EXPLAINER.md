@@ -22,6 +22,8 @@ def ledger_balances_for_merchant(merchant_id: UUID | str) -> dict[str, int]:
 
 Credits and debits are bucketed into `available` and `held`. A payout request debits available and credits held, so total merchant liability does not change when funds are only reserved. A completed payout debits held. A failed payout debits held and credits available in the same transaction.
 
+**Why model it this way?** This double-entry ledger design strictly follows the accounting principle that money is never created or destroyed, merely moved between buckets. Subtracting directly from a "balance" column without journaling creates irreversible history gaps. By enforcing equal and opposite movements across `Available` and `Held`, we guarantee 100% auditability and enable atomic refunds upon payout failure without resorting to manual subtraction checks.
+
 `Merchant.available_balance_paise` and `Merchant.held_balance_paise` are materialized copies updated in the same database transactions as the ledger entries. The aggregate query above is used for audits, dashboard reconciliation, and anomaly repair.
 
 The merchant row also stores `reconciled_available_balance_paise`, `reconciled_held_balance_paise`, and `balance_reconciled_ledger_entry_id`. Those fields are a watermark proving which ledger state the materialized balances are known to match. The normal payout admission path avoids full ledger aggregation when the watermark is current; it reconciles from the ledger when the materialized values or ledger watermark do not match.
